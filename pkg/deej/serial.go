@@ -33,12 +33,22 @@ type SerialIO struct {
 	currentSliderPercentValues []float32
 
 	sliderMoveConsumers []chan SliderMoveEvent
+
+	lastKnownNumSwitches        int
+	currentSwitchesValues []int
+
+	switchToggleConsumers []chan SwitchToggleEvent
 }
 
 // SliderMoveEvent represents a single slider move captured by deej
 type SliderMoveEvent struct {
 	SliderID     int
 	PercentValue float32
+}
+
+type SwitchToggleEvent struct {
+	SwitchID     int
+	Value int
 }
 
 var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
@@ -55,6 +65,7 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 		connected:           false,
 		conn:                nil,
 		sliderMoveConsumers: []chan SliderMoveEvent{},
+		switchToggleConsumers: []chan SwitchToggleEvent{},
 	}
 
 	logger.Debug("Created serial i/o instance")
@@ -142,6 +153,13 @@ func (sio *SerialIO) Stop() {
 func (sio *SerialIO) SubscribeToSliderMoveEvents() chan SliderMoveEvent {
 	ch := make(chan SliderMoveEvent)
 	sio.sliderMoveConsumers = append(sio.sliderMoveConsumers, ch)
+
+	return ch
+}
+
+func (sio *SerialIO) SubscribeToSwitchToggleEvent() chan SwitchToggleEvent {
+	ch := make(chan SwitchToggleEvent)
+	sio.switchToggleConsumers = append(sio.switchToggleConsumers, ch)
 
 	return ch
 }
@@ -238,70 +256,139 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 	// trim the suffix
 	line = strings.TrimSuffix(line, "\r\n")
 
+	// detect if slider or switch
 	// split on pipe (|), this gives a slice of numerical strings between "0" and "1023"
 	splitLine := strings.Split(line, "|")
-	numSliders := len(splitLine)
+	if splitLine[0] == "Slider" {
+		splitLine = splitLine[1:]
+		numSliders := len(splitLine)
 
-	// update our slider count, if needed - this will send slider move events for all
-	if numSliders != sio.lastKnownNumSliders {
-		logger.Infow("Detected sliders", "amount", numSliders)
-		sio.lastKnownNumSliders = numSliders
-		sio.currentSliderPercentValues = make([]float32, numSliders)
-
-		// reset everything to be an impossible value to force the slider move event later
-		for idx := range sio.currentSliderPercentValues {
-			sio.currentSliderPercentValues[idx] = -1.0
+		// update our slider count, if needed - this will send slider move events for all
+		if numSliders != sio.lastKnownNumSliders {
+			logger.Infow("Detected sliders", "amount", numSliders)
+			sio.lastKnownNumSliders = numSliders
+			sio.currentSliderPercentValues = make([]float32, numSliders)
+	
+			// reset everything to be an impossible value to force the slider move event later
+			for idx := range sio.currentSliderPercentValues {
+				sio.currentSliderPercentValues[idx] = -1.0
+			}
 		}
-	}
-
-	// for each slider:
-	moveEvents := []SliderMoveEvent{}
-	for sliderIdx, stringValue := range splitLine {
-
-		// convert string values to integers ("1023" -> 1023)
-		number, _ := strconv.Atoi(stringValue)
-
-		// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
-		// so let's check the first number for correctness just in case
-		if sliderIdx == 0 && number > 1023 {
-			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
-			return
+	
+		// for each slider:
+		moveEvents := []SliderMoveEvent{}
+		for sliderIdx, stringValue := range splitLine {
+	
+			// convert string values to integers ("1023" -> 1023)
+			number, _ := strconv.Atoi(stringValue)
+	
+			// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
+			// so let's check the first number for correctness just in case
+			if sliderIdx == 0 && number > 1023 {
+				sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
+				return
+			}
+	
+			// map the value from raw to a "dirty" float between 0 and 1 (e.g. 0.15451...)
+			dirtyFloat := float32(number) / 1023.0
+	
+			// normalize it to an actual volume scalar between 0.0 and 1.0 with 2 points of precision
+			normalizedScalar := util.NormalizeScalar(dirtyFloat)
+	
+			// if sliders are inverted, take the complement of 1.0
+			if sio.deej.config.InvertSliders {
+				normalizedScalar = 1 - normalizedScalar
+			}
+	
+			// check if it changes the desired state (could just be a jumpy raw slider value)
+			if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
+	
+				// if it does, update the saved value and create a move event
+				sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
+	
+				moveEvents = append(moveEvents, SliderMoveEvent{
+					SliderID:     sliderIdx,
+					PercentValue: normalizedScalar,
+				})
+	
+				if sio.deej.Verbose() {
+					logger.Debugw("Slider moved", "event", moveEvents[len(moveEvents)-1])
+				}
+			}
 		}
-
-		// map the value from raw to a "dirty" float between 0 and 1 (e.g. 0.15451...)
-		dirtyFloat := float32(number) / 1023.0
-
-		// normalize it to an actual volume scalar between 0.0 and 1.0 with 2 points of precision
-		normalizedScalar := util.NormalizeScalar(dirtyFloat)
-
-		// if sliders are inverted, take the complement of 1.0
-		if sio.deej.config.InvertSliders {
-			normalizedScalar = 1 - normalizedScalar
+	
+		// deliver move events if there are any, towards all potential consumers
+		if len(moveEvents) > 0 {
+			for _, consumer := range sio.sliderMoveConsumers {
+				for _, moveEvent := range moveEvents {
+					consumer <- moveEvent
+				}
+			}
 		}
+	} else 
+	{
+		splitLine = splitLine[1:]
+		numSwitches := len(splitLine)
 
-		// check if it changes the desired state (could just be a jumpy raw slider value)
-		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
+		// update our slider count, if needed - this will send slider move events for all
+		if numSwitches != sio.lastKnownNumSwitches {
+			logger.Infow("Detected sliders", "amount", numSwitches)
+			sio.lastKnownNumSwitches = numSwitches
+			sio.currentSwitchesValues = make([]int, numSwitches)
+	
+			// reset everything to be an impossible value to force the slider move event later
+			for idx := range sio.currentSwitchesValues {
+				sio.currentSwitchesValues[idx] = -1.0
+			}
+		}
+	
+		// for each switch:
+		moveEvents := []SwitchToggleEvent{}
+		for switchIdx, stringValue := range splitLine {
+	
+			// convert string values to integers ("1" -> 1)
+			number, _ := strconv.Atoi(stringValue)
+	
+			// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
+			// so let's check the first number for correctness just in case
+			// if switchIdx == 0 && number > 1023 {
+			// 	sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
+			// 	return
+			// }
+	
+			// map the value from raw to a "dirty" float between 0 and 1 (e.g. 0.15451...)
+			// dirtyFloat := float32(number) / 1023.0
+	
+			// // normalize it to an actual volume scalar between 0.0 and 1.0 with 2 points of precision
+			// normalizedScalar := util.NormalizeScalar(dirtyFloat)
+	
+			// // if sliders are inverted, take the complement of 1.0
+			// if sio.deej.config.InvertSliders {
+			// 	normalizedScalar = 1 - normalizedScalar
+			// }
+	
 
 			// if it does, update the saved value and create a move event
-			sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
+			sio.currentSwitchesValues[switchIdx] = number
 
-			moveEvents = append(moveEvents, SliderMoveEvent{
-				SliderID:     sliderIdx,
-				PercentValue: normalizedScalar,
+			moveEvents = append(moveEvents, SwitchToggleEvent{
+				SwitchID:     switchIdx,
+				Value: number,
 			})
 
 			if sio.deej.Verbose() {
-				logger.Debugw("Slider moved", "event", moveEvents[len(moveEvents)-1])
+				logger.Debugw("Switch toggled", "event", moveEvents[len(moveEvents)-1])
+			}
+		}
+	
+		// deliver move events if there are any, towards all potential consumers
+		if len(moveEvents) > 0 {
+			for _, consumer := range sio.switchToggleConsumers {
+				for _, moveEvent := range moveEvents {
+					consumer <- moveEvent
+				}
 			}
 		}
 	}
 
-	// deliver move events if there are any, towards all potential consumers
-	if len(moveEvents) > 0 {
-		for _, consumer := range sio.sliderMoveConsumers {
-			for _, moveEvent := range moveEvents {
-				consumer <- moveEvent
-			}
-		}
-	}
 }
