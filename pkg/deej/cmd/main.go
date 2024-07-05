@@ -41,7 +41,7 @@ func main() {
 	if verbose {
 		named.Debug("Verbose flag provided, all log messages will be shown")
 	}
-
+	// verbose = true
 	// create the deej instance
 	d, err := deej.NewDeej(logger, verbose)
 	if err != nil {

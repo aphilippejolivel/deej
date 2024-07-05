@@ -22,6 +22,7 @@ type wcaSession struct {
 
 	control *wca.IAudioSessionControl2
 	volume  *wca.ISimpleAudioVolume
+	aev 	*wca.IAudioEndpointVolume
 
 	eventCtx *ole.GUID
 }
@@ -40,6 +41,7 @@ func newWCASession(
 	logger *zap.SugaredLogger,
 	control *wca.IAudioSessionControl2,
 	volume *wca.ISimpleAudioVolume,
+	aev *wca.IAudioEndpointVolume,
 	pid uint32,
 	eventCtx *ole.GUID,
 ) (*wcaSession, error) {
@@ -47,6 +49,7 @@ func newWCASession(
 	s := &wcaSession{
 		control:  control,
 		volume:   volume,
+		aev:   aev,
 		pid:      pid,
 		eventCtx: eventCtx,
 	}
@@ -89,6 +92,7 @@ func newWCASession(
 func newMasterSession(
 	logger *zap.SugaredLogger,
 	volume *wca.IAudioEndpointVolume,
+	aev *wca.IAudioEndpointVolume,
 	eventCtx *ole.GUID,
 	key string,
 	loggerKey string,
@@ -118,6 +122,26 @@ func (s *wcaSession) GetVolume() float32 {
 
 	return level
 }
+
+func (s *wcaSession) GetMute() bool {
+	var mute bool
+
+	if err := s.aev.GetMute(&mute); err != nil {
+		s.logger.Warnw("Failed to get session mute", "error", err)
+	}
+
+	return mute
+}
+
+func (s *wcaSession) SetMute(m bool) error{
+
+	if err := s.aev.SetMute(!m, nil); err != nil {
+		s.logger.Warnw("Failed to set session mute", "error", err)
+	}
+
+	return nil
+}
+
 
 func (s *wcaSession) SetVolume(v float32) error {
 	if err := s.volume.SetMasterVolume(v, s.eventCtx); err != nil {
@@ -179,6 +203,25 @@ func (s *masterSession) SetVolume(v float32) error {
 	}
 
 	s.logger.Debugw("Adjusting session volume", "to", fmt.Sprintf("%.2f", v))
+
+	return nil
+}
+
+func (s *masterSession) GetMute() bool {
+	var mute bool
+
+	if err := s.volume.GetMute(&mute); err != nil {
+		s.logger.Warnw("Failed to get session mute", "error", err)
+	}
+
+	return mute
+}
+
+func (s *masterSession) SetMute(m bool) error{
+
+	if err := s.volume.SetMute(!m, nil); err != nil {
+		s.logger.Warnw("Failed to get session mute", "error", err)
+	}
 
 	return nil
 }

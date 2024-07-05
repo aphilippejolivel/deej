@@ -51,7 +51,7 @@ type SwitchToggleEvent struct {
 	Value int
 }
 
-var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
+var expectedLinePattern = regexp.MustCompile(`^\w+(\|\d{1,4})*\r\n$`)
 
 // NewSerialIO creates a SerialIO instance that uses the provided deej
 // instance's connection info to establish communications with the arduino chip

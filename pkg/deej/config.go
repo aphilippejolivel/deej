@@ -24,6 +24,7 @@ type CanonicalConfig struct {
 	}
 
 	InvertSliders bool
+	MicMutable bool
 
 	NoiseReductionLevel string
 
@@ -50,6 +51,7 @@ const (
 
 	configKeySliderMapping       = "slider_mapping"
 	configKeyInvertSliders       = "invert_sliders"
+	configKeyMicMutable			 = "mic_mutable"
 	configKeyCOMPort             = "com_port"
 	configKeyBaudRate            = "baud_rate"
 	configKeyNoiseReductionLevel = "noise_reduction"
@@ -87,6 +89,7 @@ func NewConfig(logger *zap.SugaredLogger, notifier Notifier) (*CanonicalConfig, 
 
 	userConfig.SetDefault(configKeySliderMapping, map[string][]string{})
 	userConfig.SetDefault(configKeyInvertSliders, false)
+	userConfig.SetDefault(configKeyMicMutable, false)
 	userConfig.SetDefault(configKeyCOMPort, defaultCOMPort)
 	userConfig.SetDefault(configKeyBaudRate, defaultBaudRate)
 
@@ -146,7 +149,8 @@ func (cc *CanonicalConfig) Load() error {
 	cc.logger.Infow("Config values",
 		"sliderMapping", cc.SliderMapping,
 		"connectionInfo", cc.ConnectionInfo,
-		"invertSliders", cc.InvertSliders)
+		"invertSliders", cc.InvertSliders,
+		"MicMutable", cc.MicMutable)
 
 	return nil
 }
@@ -237,6 +241,7 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 	}
 
 	cc.InvertSliders = cc.userConfig.GetBool(configKeyInvertSliders)
+	cc.MicMutable = cc.userConfig.GetBool(configKeyMicMutable)
 	cc.NoiseReductionLevel = cc.userConfig.GetString(configKeyNoiseReductionLevel)
 
 	cc.logger.Debug("Populated config fields from vipers")
